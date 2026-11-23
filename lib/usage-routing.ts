@@ -20,7 +20,7 @@ type PaceSnapshot = {
   surplusFraction?: number;
 };
 
-type UsageWindow = {
+export type UsageWindow = {
   provider: string;
   id: string;
   label: string;
@@ -35,11 +35,13 @@ type UsageWindow = {
   remainingFraction: number;
   usedFraction: number;
   status: string;
+  /** When the source last measured this window. */
+  fetchedAt: number;
   paceAtRefresh?: PaceSnapshot;
 };
 
 export type UsageSnapshot = {
-  version: 4;
+  version: 5;
   refreshedAt: number;
   sourceGeneratedAt: number;
   windows: UsageWindow[];
@@ -131,6 +133,7 @@ export function normalizeUsage(payload: unknown, refreshedAt = Date.now()): Usag
       resetCredits[provider] = (resetCredits[provider] ?? 0) + Math.floor(availableCount);
     }
     if (!Array.isArray(report.limits)) continue;
+    const fetchedAt = finiteNumber(report.fetchedAt) ?? refreshedAt;
 
     for (const rawLimit of report.limits) {
       if (!rawLimit || typeof rawLimit !== "object") continue;
@@ -168,6 +171,7 @@ export function normalizeUsage(payload: unknown, refreshedAt = Date.now()): Usag
         remainingFraction,
         usedFraction,
         status: typeof limit.status === "string" ? limit.status : "unknown",
+        fetchedAt,
       };
       normalized.paceAtRefresh = {
         calculatedAt: refreshedAt,
@@ -179,7 +183,7 @@ export function normalizeUsage(payload: unknown, refreshedAt = Date.now()): Usag
 
   windows.sort((a, b) => a.provider.localeCompare(b.provider) || a.scope.localeCompare(b.scope) || a.label.localeCompare(b.label));
   return {
-    version: 4,
+    version: 5,
     refreshedAt,
     sourceGeneratedAt: finiteNumber(root.generatedAt) ?? refreshedAt,
     windows,
@@ -300,8 +304,16 @@ export function buildQuotaScopeOrder(
   });
   return `${strategyName(strategy)} provider/scope order (${strategy.mode === "balanced" ? "advisory quota ranking; not a model-selection order" : "left to right; apply only after capability fit"}): ${order.join(" > ")}`;
 }
-type AgentQuota = QuotaScope & {
-  agent: string;
+/** A route an assistant can pick, with the quota windows that bill it. */
+export type QuotaRoute = {
+  name: string;
+  provider: string;
+  scope: string;
+  windows: UsageWindow[];
+};
+
+type RouteQuota = QuotaScope & {
+  name: string;
 };
 
 export function selectAgentRoutes(
@@ -342,51 +354,57 @@ function applicableWindows(snapshot: UsageSnapshot, model: ResolvedModel): { sco
   };
 }
 
-function evaluateAgentQuotas(
+function resolveAgentRoutes(
   snapshot: UsageSnapshot,
   agents: AgentRoute[],
   resolveModel: (spec: string) => ResolvedModel | undefined,
-  now: number,
-): AgentQuota[] {
-  const candidates: AgentQuota[] = [];
+): QuotaRoute[] {
+  const routes: QuotaRoute[] = [];
   for (const agent of agents) {
     const model = agent.modelSelectors.map(resolveModel).find((value): value is ResolvedModel => value !== undefined);
     if (!model) continue;
-    const applicable = applicableWindows(snapshot, model);
-    if (!applicable.windows.length) continue;
-    const pace = applicable.windows.map(window => calculatePace(window, now));
+    routes.push({ name: agent.name, provider: model.provider, ...applicableWindows(snapshot, model) });
+  }
+  return routes;
+}
+
+function evaluateRoutes(routes: readonly QuotaRoute[], now: number): RouteQuota[] {
+  const candidates: RouteQuota[] = [];
+  for (const route of routes) {
+    if (!route.windows.length) continue;
+    const pace = route.windows.map(window => calculatePace(window, now));
     const knownDeficits = pace.flatMap(value => value.deficitFraction === undefined ? [] : [value.deficitFraction]);
     candidates.push({
-      agent: agent.name,
-      provider: model.provider,
-      scope: applicable.scope,
+      name: route.name,
+      provider: route.provider,
+      scope: route.scope,
       deficitFraction: knownDeficits.length ? Math.max(...knownDeficits) : Number.POSITIVE_INFINITY,
-      headroomFraction: Math.min(...applicable.windows.map(window => window.remainingFraction)),
-      reserveReached: applicable.windows.some(window =>
+      headroomFraction: Math.min(...route.windows.map(window => window.remainingFraction)),
+      reserveReached: route.windows.some(window =>
         window.remainingFraction <= RESERVE_FRACTION || window.status !== "ok"
       ),
-      paceUnknown: knownDeficits.length !== applicable.windows.length,
+      paceUnknown: knownDeficits.length !== route.windows.length,
     });
   }
   return candidates;
 }
 
-export function buildAgentQuotaOrder(
+/** Ranks routes by quota pressure. Routes with no windows are left out, not guessed. */
+export function buildRouteOrder(
   snapshot: UsageSnapshot,
-  agents: AgentRoute[],
-  resolveModel: (spec: string) => ResolvedModel | undefined,
-  now = Date.now(),
-  strategy: QuotaStrategy = DEFAULT_STRATEGY,
+  routes: readonly QuotaRoute[],
+  now: number,
+  strategy: QuotaStrategy,
 ): string | undefined {
-  const candidates = evaluateAgentQuotas(snapshot, agents, resolveModel, now);
+  const candidates = evaluateRoutes(routes, now);
 
   candidates.sort((left, right) =>
     compareQuota(left, right, strategy, snapshot.resetCredits)
-    || left.agent.localeCompare(right.agent)
+    || left.name.localeCompare(right.name)
   );
   if (!candidates.length) return undefined;
 
-  const groups: Array<AgentQuota & { agents: string[] }> = [];
+  const groups: Array<RouteQuota & { names: string[] }> = [];
   for (const candidate of candidates) {
     const previous = groups.at(-1);
     if (
@@ -398,18 +416,28 @@ export function buildAgentQuotaOrder(
       && previous.reserveReached === candidate.reserveReached
       && previous.paceUnknown === candidate.paceUnknown
     ) {
-      previous.agents.push(candidate.agent);
+      previous.names.push(candidate.name);
     } else {
-      groups.push({ ...candidate, agents: [candidate.agent] });
+      groups.push({ ...candidate, names: [candidate.name] });
     }
   }
 
   const order = groups.map(group => {
     const deficit = group.paceUnknown ? "pace unknown" : `${percent(group.deficitFraction)} deficit`;
     const reserve = group.reserveReached ? ", reserve reached" : "";
-    return `${group.agents.join("/")} [${group.provider}/${group.scope}: ${deficit}, ${percent(group.headroomFraction)} left${reserve}]`;
+    return `${group.names.join("/")} [${group.provider}/${group.scope}: ${deficit}, ${percent(group.headroomFraction)} left${reserve}]`;
   });
   return `${strategyName(strategy)} route order (${strategy.mode === "balanced" ? "advisory quota ranking; not a model-selection order" : "left to right; apply only after capability fit"}): ${order.join(" > ")}`;
+}
+
+export function buildAgentQuotaOrder(
+  snapshot: UsageSnapshot,
+  agents: AgentRoute[],
+  resolveModel: (spec: string) => ResolvedModel | undefined,
+  now = Date.now(),
+  strategy: QuotaStrategy = DEFAULT_STRATEGY,
+): string | undefined {
+  return buildRouteOrder(snapshot, resolveAgentRoutes(snapshot, agents, resolveModel), now, strategy);
 }
 
 export const QUOTA_EXCEPTION_MARKER = "[quota-route-exception:";
@@ -424,7 +452,7 @@ export function quotaStrategyViolation(
 ): string | undefined {
   if (strategy.mode !== "targeted") return undefined;
 
-  const candidates = evaluateAgentQuotas(snapshot, agents, resolveModel, now);
+  const candidates = evaluateRoutes(resolveAgentRoutes(snapshot, agents, resolveModel), now);
   const context = typeof input.context === "string" ? input.context : "";
   const rawTasks = Array.isArray(input.tasks) ? input.tasks : [input];
 
@@ -434,16 +462,16 @@ export function quotaStrategyViolation(
     const instructions = `${context}\n${typeof task.task === "string" ? task.task : ""}`.toLowerCase();
     if (instructions.includes(QUOTA_EXCEPTION_MARKER)) continue;
     const agent = typeof task.agent === "string" && task.agent.trim() ? task.agent.trim() : "task";
-    const selected = candidates.find(candidate => candidate.agent === agent);
+    const selected = candidates.find(candidate => candidate.name === agent);
     if (!selected) continue;
 
     const healthy = candidates.filter(candidate =>
-      candidate.agent !== agent
+      candidate.name !== agent
       && !candidate.reserveReached
       && !candidate.paceUnknown
       && candidate.deficitFraction < 0.001
     );
-    let alternatives: AgentQuota[] = [];
+    let alternatives: RouteQuota[] = [];
     const credits = snapshot.resetCredits[strategy.provider] ?? 0;
     if (selected.provider !== strategy.provider) {
       alternatives = candidates.filter(candidate =>
@@ -457,17 +485,21 @@ export function quotaStrategyViolation(
 
     alternatives.sort((left, right) =>
       compareQuota(left, right, strategy, snapshot.resetCredits)
-      || left.agent.localeCompare(right.agent)
+      || left.name.localeCompare(right.name)
     );
-    const names = [...new Set(alternatives.map(candidate => candidate.agent))].slice(0, 8);
+    const names = [...new Set(alternatives.map(candidate => candidate.name))].slice(0, 8);
     return `Quota strategy targeted (${strategy.provider}) rejected agent ${agent}. Retry with a capable option from: ${names.join(", ")}. If none satisfies required specialization or the user explicitly requested ${agent}, retry with ${QUOTA_EXCEPTION_MARKER} required specialization] in the task context.`;
   }
   return undefined;
 }
 
 export type RoutingSurface = {
+  /** Where the quota rows come from, given the snapshot's age. */
+  sourceLine(age: string): string;
   /** Where the route order's entries come from, so the model does not infer a stale list. */
   routeSource: string;
+  /** How rows apply to routes. */
+  scopeNote: string;
   /** Whether a tool-call guard rejects off-target calls under the targeted strategy. */
   guardsTargeted: boolean;
   /** Surface-specific instructions for how to pick a route. */
@@ -487,7 +519,9 @@ export function buildRoutingInstruction(
   const rows = snapshot.windows.map(window => {
     const pace = calculatePace(window, now);
     const reserve = window.remainingFraction <= RESERVE_FRACTION ? "; reserve reached" : "";
-    return `- ${window.provider} [${window.scope}] ${window.label}: ${percent(window.remainingFraction)} left; resets in ${formatDuration(pace.timeRemainingMs)}; ${paceText(window, now)}${reserve}`;
+    const checkedMs = Math.max(0, now - window.fetchedAt);
+    const checked = checkedMs >= REFRESH_MS ? `; measured ${formatDuration(checkedMs)} ago, stale` : "";
+    return `- ${window.provider} [${window.scope}] ${window.label}: ${percent(window.remainingFraction)} left; resets in ${formatDuration(pace.timeRemainingMs)}; ${paceText(window, now)}${reserve}${checked}`;
   });
   const resetCredits = Object.entries(snapshot.resetCredits)
     .filter(([, count]) => count > 0)
@@ -499,7 +533,7 @@ export function buildRoutingInstruction(
 
   return [
     ROUTING_HEADER,
-    `Automatic shared snapshot; provider usage refreshes when older than 30 minutes (age ${formatDuration(ageMs)}${stale}). Do not run or parse \`omp usage\` yourself.`,
+    surface.sourceLine(`${formatDuration(ageMs)}${stale}`),
     `Active strategy: ${strategy.mode === "balanced" ? "balanced" : `targeted (${strategy.provider})`}.`,
     ...(resetCredits ? [`Saved reset credits: ${resetCredits}.`] : []),
     ...rows,
@@ -511,7 +545,7 @@ export function buildRoutingInstruction(
     ...(strategy.mode === "targeted" && surface.guardsTargeted ? [
       `A task call that violates the targeted strategy is rejected before spawning. Retry with a listed capable agent, or add ${QUOTA_EXCEPTION_MARKER} required specialization] to that task's instructions when specialization or an explicit user choice must override quota routing.`,
     ] : []),
-    "Scope: shared rows apply provider-wide; model/tier/group rows apply to matching models. Codex Chat and Spark are a narrow explicit exception because upstream omits that distinction from its default scope metadata. Missing limits are unknown; never invent them.",
+    surface.scopeNote,
   ].join("\n");
 }
 
@@ -526,7 +560,9 @@ function isUsageWindow(value: unknown): value is UsageWindow {
     && Number.isFinite(candidate.remainingFraction)
     && typeof candidate.usedFraction === "number"
     && Number.isFinite(candidate.usedFraction)
-    && typeof candidate.status === "string";
+    && typeof candidate.status === "string"
+    && typeof candidate.fetchedAt === "number"
+    && Number.isFinite(candidate.fetchedAt);
 }
 
 function isResetCreditMap(value: unknown): value is Record<string, number> {
@@ -539,7 +575,7 @@ function isResetCreditMap(value: unknown): value is Record<string, number> {
 function isUsageSnapshot(value: unknown): value is UsageSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return candidate.version === 4
+  return candidate.version === 5
     && typeof candidate.refreshedAt === "number"
     && Number.isFinite(candidate.refreshedAt)
     && typeof candidate.sourceGeneratedAt === "number"

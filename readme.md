@@ -1,7 +1,7 @@
 # Usage-aware routing
 
 An [OMP](https://omp.sh/) plugin and a T3 Code hook that give the assistant live quota context when it chooses subagent models.
-Both read quota through OMP, so the T3 hook needs OMP installed too.
+The OMP plugin reads quota through `omp usage`. The T3 hook reads the usage meters that T3 keeps itself.
 
 Balanced routing weighs task suitability and quota pressure together. It does not force a weaker model because its quota is healthier.
 
@@ -107,8 +107,25 @@ Codex Chat and Spark meters remain separate.
 
 T3 Code runs each thread through the provider's own CLI, so user-level hooks fire inside T3.
 `t3/routing-hook.ts` adds the same quota context to Claude Code and Codex sessions.
-It ranks T3 provider routes instead of OMP agents: Claude models, Claude Fable, Codex GPT models, and Codex Spark models.
-OMP must still be installed, because the hook reads quota through `omp usage --json` and shares the OMP cache and strategy files.
+
+The hook reads quota from the usage meters that T3 keeps for each provider instance in `~/.t3/caches/<instance>.json`.
+T3 refreshes these meters. The hook only reads them, and it marks a meter older than 30 minutes as stale.
+The meters are T3 internals, not a public API. If a T3 update changes their shape, the hook adds no quota context.
+
+The hook ranks routes instead of OMP agents. Each route is a T3 provider instance and a model family:
+
+| Route | Meters that bill it |
+| --- | --- |
+| `claudeAgent (opus, sonnet, haiku)` | Claude weekly |
+| `claudeAgent (fable)` | Claude weekly and Claude Fable weekly |
+| `codex (gpt)` | Codex meters other than Spark |
+| `codex (spark)` | Codex Spark meters |
+| `antigravity (gemini)` | Antigravity Gemini weekly |
+| `antigravity (claude, gpt-oss)` | Antigravity shared Claude and GPT weekly |
+
+A provider instance with meters but no row in this table gets one route that all of its meters bill.
+A route with no meter, such as Codex Spark today, is left out.
+OMP is not required. Without it, the strategy is balanced.
 
 Register the hook for the `SessionStart` and `UserPromptSubmit` events in `~/.claude/settings.json` and `~/.codex/hooks.json`:
 
@@ -126,8 +143,8 @@ Register the hook for the `SessionStart` and `UserPromptSubmit` events in `~/.cl
 
 Codex runs a new hook only after you trust it. Open an interactive Codex session and approve the hook before you use it in T3.
 
-The hook adds context at session start, after compaction, and on the next prompt after the snapshot refreshes or the strategy changes.
-Change the strategy with `/quota-strategy` in OMP. T3 has no command for it.
+The hook adds context at session start, after compaction, and on the next prompt after a meter changes or the strategy changes.
+Change the strategy with `/quota-strategy` in OMP. T3 has no command for it. The hook translates a targeted OMP provider to its T3 instance, such as `anthropic` to `claudeAgent`.
 
 The hook only gives advice. It does not block subagent calls, so the targeted strategy is advisory in T3.
 
@@ -138,6 +155,7 @@ The hook only gives advice. It does not block subagent calls, so the targeted st
 | `~/.omp/cache/usage-routing.json` | Shared quota snapshot | `OMP_USAGE_ROUTING_CACHE` |
 | `~/.omp/cache/usage-routing-strategy.json` | Strategy shared across sessions | `OMP_USAGE_ROUTING_STRATEGY` |
 | `~/.omp/cache/usage-routing-t3-sessions.json` | Context version each T3 session last received | `OMP_USAGE_ROUTING_T3_SESSIONS` |
+| `~/.t3/caches/` | T3 usage meters, read only | `USAGE_ROUTING_T3_CACHES` |
 
 Changing or uninstalling the plugin does not delete these files.
 

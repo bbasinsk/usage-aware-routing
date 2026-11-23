@@ -17,6 +17,8 @@ import {
 } from "../lib/usage-routing.ts";
 
 const OMP_SURFACE: RoutingSurface = {
+  sourceLine: age => `Automatic shared snapshot; provider usage refreshes when older than 30 minutes (age ${age}). Do not run or parse \`omp usage\` yourself.`,
+  scopeNote: "Scope: shared rows apply provider-wide; model/tier/group rows apply to matching models. Codex Chat and Spark are a narrow explicit exception because upstream omits that distinction from its default scope metadata. Missing limits are unknown; never invent them.",
   routeSource: "The route order is resolved from current project/user/plugin/bundled agent definitions and their model selectors; never infer a stale allowlist.",
   guardsTargeted: true,
   guidance: [],
