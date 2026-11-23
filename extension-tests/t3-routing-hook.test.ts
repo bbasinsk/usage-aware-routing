@@ -1,81 +1,91 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeUsage } from "../lib/usage-routing.ts";
-import { contextVersion, routingContext } from "../t3/routing-hook.ts";
+import { contextVersion, normalizeT3Usage, routingContext } from "../t3/routing-hook.ts";
 
 const NOW = Date.UTC(2026, 10, 23, 12);
 const HOUR = 60 * 60 * 1000;
+const WEEK_MINS = 7 * 24 * 60;
+const iso = (ms: number) => new Date(ms).toISOString();
 const balanced = { version: 1 as const, mode: "balanced" as const, updatedAt: NOW };
 
-const snapshot = normalizeUsage({
-  reports: [
-    {
-      provider: "anthropic",
-      limits: [
-        {
-          id: "anthropic:7d",
-          label: "Claude 7 Day",
-          scope: { provider: "anthropic" },
-          window: { durationMs: 100 * HOUR, resetsAt: NOW + 60 * HOUR },
-          amount: { usedFraction: 0.6, remainingFraction: 0.4 },
-          status: "ok",
-        },
-        {
-          id: "anthropic:7d:fable",
-          label: "Claude 7 Day (Fable)",
-          scope: { provider: "anthropic", tier: "fable" },
-          window: { durationMs: 100 * HOUR, resetsAt: NOW + 60 * HOUR },
-          amount: { usedFraction: 0, remainingFraction: 1 },
-          status: "ok",
-        },
-      ],
-    },
-    {
-      provider: "openai-codex",
-      limits: [{
-        id: "openai-codex:primary",
-        label: "7 days",
-        scope: { provider: "openai-codex" },
-        window: { durationMs: 100 * HOUR, resetsAt: NOW + 60 * HOUR },
-        amount: { usedFraction: 0.1, remainingFraction: 0.9 },
-        status: "ok",
-      }],
-    },
-  ],
-}, NOW);
+// Shaped like the `usageLimits` sections in ~/.t3/caches/<instance>.json.
+const meters = {
+  claudeAgent: {
+    checkedAt: iso(NOW - 60_000),
+    windows: [
+      { id: "seven_day", kind: "weekly", label: "Weekly", windowDurationMins: WEEK_MINS, usedPercent: 60, resetsAt: iso(NOW + 84 * HOUR) },
+      { id: "seven_day_fable", kind: "weekly", label: "Weekly · Fable", windowDurationMins: WEEK_MINS, usedPercent: 0, resetsAt: iso(NOW + 84 * HOUR) },
+    ],
+  },
+  codex: {
+    checkedAt: iso(NOW - 60_000),
+    windows: [{ id: "primary", kind: "weekly", label: "Weekly", windowDurationMins: WEEK_MINS, usedPercent: 10, resetsAt: iso(NOW + 84 * HOUR) }],
+    resetCredits: { availableCount: 2 },
+  },
+  antigravity: {
+    checkedAt: iso(NOW - 72 * HOUR),
+    windows: [
+      { id: "3p-weekly", kind: "weekly", label: "Claude & GPT (shared) · Weekly", usedPercent: 0, windowDurationMins: WEEK_MINS },
+      { id: "gemini-weekly", kind: "weekly", label: "Gemini · Weekly", usedPercent: 0, windowDurationMins: WEEK_MINS },
+    ],
+  },
+  opencode: { checkedAt: iso(NOW), windows: [], unavailable: { reason: "unsupported" } },
+};
 
 describe("T3 routing hook", () => {
-  test("ranks T3 provider routes and keeps balanced advice advisory", () => {
+  const snapshot = normalizeT3Usage(meters, NOW);
+
+  test("reads T3 meters per provider instance", () => {
+    expect(snapshot.windows.map(window => window.id)).toEqual([
+      "antigravity:3p-weekly",
+      "antigravity:gemini-weekly",
+      "claudeAgent:seven_day",
+      "claudeAgent:seven_day_fable",
+      "codex:primary",
+    ]);
+    expect(snapshot.resetCredits).toEqual({ codex: 2 });
+    expect(snapshot.windows.find(window => window.id === "claudeAgent:seven_day")!.remainingFraction).toBeCloseTo(0.4);
+  });
+
+  test("ranks model-family routes, with Antigravity billed apart from the Claude plan", () => {
     const context = routingContext(snapshot, balanced, NOW)!;
     const order = context.split("\n").find(line => line.startsWith("Balanced route order"))!;
 
-    // Codex is ahead of pace; Claude is 20% behind. Fable also bills the shared Claude window.
-    expect(order.indexOf("codex (gpt) [openai-codex/Chat")).toBeLessThan(order.indexOf("claude (opus, sonnet, haiku) [anthropic/shared"));
-    expect(order).toContain("claude-fable [anthropic/shared+tier=fable: 20.0% deficit");
-    // No Spark window exists, so the Spark route is left out instead of guessed.
-    expect(order).not.toContain("codex-spark");
+    // Codex is ahead of pace; Claude is 10% behind; Antigravity has no reset time, so its pace is unknown.
+    expect(order.indexOf("codex (gpt) [codex/primary")).toBeLessThan(order.indexOf("claudeAgent (opus, sonnet, haiku) [claudeAgent/seven_day:"));
+    expect(order).toContain("claudeAgent (fable) [claudeAgent/seven_day+seven_day_fable: 10.0% deficit");
+    expect(order).toContain("antigravity (gemini) [antigravity/gemini-weekly: pace unknown, 100.0% left]");
+    expect(order).toContain("antigravity (claude, gpt-oss) [antigravity/3p-weekly: pace unknown, 100.0% left]");
+    // No Spark meter exists, so the Spark route is left out instead of guessed.
+    expect(order).not.toContain("codex (spark)");
 
-    expect(context).toContain("delegate_task");
-    expect(context).toContain("advisory");
+    const antigravityRow = context.split("\n").find(line => line.startsWith("- antigravity [gemini-weekly]"))!;
+    expect(antigravityRow).toContain("measured 3d0h ago, stale");
+    expect(context).not.toContain("omp usage");
     expect(context).not.toContain("rejected before spawning");
   });
 
-  test("states targeted mode without claiming a guard T3 does not run", () => {
+  test("translates a targeted OMP provider to its T3 instance", () => {
     const targeted = { version: 1 as const, mode: "targeted" as const, provider: "anthropic", updatedAt: NOW };
     const context = routingContext(snapshot, targeted, NOW)!;
-    expect(context).toContain("Active strategy: targeted (anthropic)");
-    expect(context).not.toContain("rejected before spawning");
+    expect(context).toContain("Active strategy: targeted (claudeAgent)");
+    expect(context.split("\n").find(line => line.startsWith("Targeted claudeAgent route order"))!)
+      .toMatch(/^[^>]*claudeAgent/);
   });
 
-  test("quality mode omits quota data, and no snapshot adds nothing", () => {
+  test("quality mode omits quota data, and no meters add nothing", () => {
     const quality = { version: 1 as const, mode: "quality" as const, updatedAt: NOW };
-    expect(routingContext(undefined, quality, NOW)).toContain("Active strategy: quality");
-    expect(routingContext(undefined, balanced, NOW)).toBeUndefined();
+    expect(routingContext(snapshot, quality, NOW)).toContain("Active strategy: quality");
+    expect(routingContext(normalizeT3Usage({}, NOW), balanced, NOW)).toBeUndefined();
   });
 
-  test("context version changes only on refresh or strategy change", () => {
-    const refreshed = { ...snapshot, refreshedAt: NOW + HOUR };
-    expect(contextVersion(snapshot, balanced)).toBe(contextVersion({ ...snapshot }, balanced));
-    expect(contextVersion(refreshed, balanced)).not.toBe(contextVersion(snapshot, balanced));
-    expect(contextVersion(snapshot, { ...balanced, updatedAt: NOW + 1 })).not.toBe(contextVersion(snapshot, balanced));
+  test("context version changes when a meter moves or goes stale, not when time passes", () => {
+    const later = normalizeT3Usage(meters, NOW + 60_000);
+    expect(contextVersion(later, balanced, NOW + 60_000)).toBe(contextVersion(snapshot, balanced, NOW));
+
+    const moved = normalizeT3Usage({ ...meters, codex: { ...meters.codex, windows: [{ ...meters.codex.windows[0], usedPercent: 11 }] } }, NOW);
+    expect(contextVersion(moved, balanced, NOW)).not.toBe(contextVersion(snapshot, balanced, NOW));
+
+    const muchLater = NOW + 31 * 60_000;
+    expect(contextVersion(normalizeT3Usage(meters, muchLater), balanced, muchLater)).not.toBe(contextVersion(snapshot, balanced, NOW));
   });
 });
