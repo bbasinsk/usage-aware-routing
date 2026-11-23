@@ -1,6 +1,7 @@
-# OMP usage-aware routing
+# Usage-aware routing
 
-An [OMP](https://omp.sh/) plugin that gives the assistant live quota context when it chooses subagent models.
+An [OMP](https://omp.sh/) plugin and a T3 Code hook that give the assistant live quota context when it chooses subagent models.
+Both read quota through OMP, so the T3 hook needs OMP installed too.
 
 Balanced routing weighs task suitability and quota pressure together. It does not force a weaker model because its quota is healthier.
 
@@ -9,13 +10,13 @@ Balanced routing weighs task suitability and quota pressure together. It does no
 1. Preview the GitHub installation:
 
    ```sh
-   omp plugin install --dry-run 'github:bbasinsk/omp-usage-aware-routing'
+   omp plugin install --dry-run 'github:bbasinsk/usage-aware-routing'
    ```
 
 2. Install the plugin:
 
    ```sh
-   omp plugin install 'github:bbasinsk/omp-usage-aware-routing'
+   omp plugin install 'github:bbasinsk/usage-aware-routing'
    ```
 
 3. Start a new OMP session to load the extension.
@@ -23,7 +24,7 @@ Balanced routing weighs task suitability and quota pressure together. It does no
 For a reproducible installation, pin the release tag:
 
 ```sh
-omp plugin install 'github:bbasinsk/omp-usage-aware-routing#v1.0.2'
+omp plugin install 'github:bbasinsk/usage-aware-routing#v1.0.2'
 ```
 
 Git installations use OMP's user plugin directory. They do not support project scope.
@@ -116,7 +117,7 @@ Register the hook for the `SessionStart` and `UserPromptSubmit` events in `~/.cl
   "hooks": [
     {
       "type": "command",
-      "command": "bun \"/path/to/omp-usage-aware-routing/t3/routing-hook.ts\"",
+      "command": "bun \"/path/to/usage-aware-routing/t3/routing-hook.ts\"",
       "timeout": 30
     }
   ]
@@ -151,7 +152,7 @@ The normalized cache excludes account identifiers and credentials. OMP handles p
 Reinstall the Git source to get its current default branch, then restart OMP:
 
 ```sh
-omp plugin install 'github:bbasinsk/omp-usage-aware-routing'
+omp plugin install 'github:bbasinsk/usage-aware-routing'
 ```
 
 Remove the plugin by package name, then restart OMP:

@@ -1,12 +1,12 @@
 {
   "name": "omp-usage-aware-routing",
   "version": "1.0.2",
-  "description": "Balance OMP subagent task suitability with live subscription quota pressure.",
+  "description": "Balance OMP and T3 Code subagent task suitability with live subscription quota pressure.",
   "type": "module",
   "author": "bbasinsk",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bbasinsk/omp-usage-aware-routing.git"
+    "url": "https://github.com/bbasinsk/usage-aware-routing.git"
   },
   "keywords": ["omp-plugin", "omp", "subagents", "quota", "routing"],
   "files": ["extensions", "lib", "t3", "readme.md"],
