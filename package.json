@@ -9,9 +9,9 @@
     "url": "https://github.com/bbasinsk/omp-usage-aware-routing.git"
   },
   "keywords": ["omp-plugin", "omp", "subagents", "quota", "routing"],
-  "files": ["extensions", "readme.md"],
+  "files": ["extensions", "lib", "t3", "readme.md"],
   "scripts": {
-    "test": "bun test extension-tests/usage-aware-routing.test.ts"
+    "test": "bun test extension-tests"
   },
   "omp": {
     "extensions": ["./extensions/usage-aware-routing.ts"]
