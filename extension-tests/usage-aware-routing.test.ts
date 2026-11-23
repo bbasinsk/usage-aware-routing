@@ -7,7 +7,7 @@ import {
   normalizeUsage,
   quotaStrategyViolation,
   selectAgentRoutes,
-} from "../extensions/usage-aware-routing";
+} from "../lib/usage-routing.ts";
 
 const NOW = Date.UTC(2026, 8, 15, 12);
 const HOUR = 60 * 60 * 1000;

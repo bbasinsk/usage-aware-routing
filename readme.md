@@ -102,12 +102,41 @@ The extension reads effective session settings, including project settings, `--c
 Provider-wide windows apply to every matching model. Model-specific and tier-specific windows also apply to their matching models.
 Codex Chat and Spark meters remain separate.
 
+## T3 Code
+
+T3 Code runs each thread through the provider's own CLI, so user-level hooks fire inside T3.
+`t3/routing-hook.ts` adds the same quota context to Claude Code and Codex sessions.
+It ranks T3 provider routes instead of OMP agents: Claude models, Claude Fable, Codex GPT models, and Codex Spark models.
+OMP must still be installed, because the hook reads quota through `omp usage --json` and shares the OMP cache and strategy files.
+
+Register the hook for the `SessionStart` and `UserPromptSubmit` events in `~/.claude/settings.json` and `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": [
+    {
+      "type": "command",
+      "command": "bun \"/path/to/omp-usage-aware-routing/t3/routing-hook.ts\"",
+      "timeout": 30
+    }
+  ]
+}
+```
+
+Codex runs a new hook only after you trust it. Open an interactive Codex session and approve the hook before you use it in T3.
+
+The hook adds context at session start, after compaction, and on the next prompt after the snapshot refreshes or the strategy changes.
+Change the strategy with `/quota-strategy` in OMP. T3 has no command for it.
+
+The hook only gives advice. It does not block subagent calls, so the targeted strategy is advisory in T3.
+
 ## Local state
 
 | File | Purpose | Environment override |
 | --- | --- | --- |
 | `~/.omp/cache/usage-routing.json` | Shared quota snapshot | `OMP_USAGE_ROUTING_CACHE` |
 | `~/.omp/cache/usage-routing-strategy.json` | Strategy shared across sessions | `OMP_USAGE_ROUTING_STRATEGY` |
+| `~/.omp/cache/usage-routing-t3-sessions.json` | Context version each T3 session last received | `OMP_USAGE_ROUTING_T3_SESSIONS` |
 
 Changing or uninstalling the plugin does not delete these files.
 
